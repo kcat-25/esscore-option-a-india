@@ -97,10 +97,15 @@ async function runPhantomAndWait(industry, location) {
   console.log(`⏳ Container ID: ${containerId} - waiting for execution to complete...`);
 
   // Step 2: Wait for the agent to finish executing
-  await waitForContainerCompletion(containerId);
+  const completionResult = await waitForContainerCompletion(containerId);
 
   // Step 3: Fetch the results from the agent's output
+  // Even if exitCode is 1, try to fetch results (may have partial data)
   const results = await fetchAgentResults();
+  
+  if (completionResult.exitCode === 1 && results.length > 0) {
+    console.warn(`⚠️ Phantom had issues (exitCode: 1) but returned ${results.length} results`);
+  }
   
   return results;
 }
@@ -134,22 +139,36 @@ async function waitForContainerCompletion(containerId) {
 
       console.log(`   Status: ${status}, Exit Code: ${exitCode}`);
 
-      // Check if execution is complete
-      if (status === "success" || exitCode === 0) {
-        console.log(`✅ Container execution completed successfully`);
-        return;
+      // Check if execution is complete (finished or success)
+      if (status === "finished" || status === "success") {
+        if (exitCode === 0) {
+          console.log(`✅ Container completed successfully (exitCode: 0)`);
+          return { success: true };
+        } else if (exitCode === 1) {
+          console.warn(`⚠️ Container finished with exitCode: 1 (may have partial results)`);
+          return { success: false, exitCode: 1 };
+        } else {
+          console.error(`❌ Container finished with exitCode: ${exitCode}`);
+          throw new Error(`Container execution failed with exitCode: ${exitCode}`);
+        }
       }
 
+      // Check for explicit errors
       if (status === "error" || status === "failure") {
         throw new Error(`Container execution failed with status: ${status}`);
       }
 
       // Still running, wait before next poll
-      console.log(`⏳ Still running... waiting ${POLL_INTERVAL_MS/1000}s`);
-      await sleep(POLL_INTERVAL_MS);
+      if (status === "running") {
+        console.log(`⏳ Still running... waiting ${POLL_INTERVAL_MS/1000}s`);
+        await sleep(POLL_INTERVAL_MS);
+      } else {
+        console.log(`⏳ Status: ${status}, waiting ${POLL_INTERVAL_MS/1000}s`);
+        await sleep(POLL_INTERVAL_MS);
+      }
 
     } catch (err) {
-      if (err.message.includes("failed with status")) {
+      if (err.message.includes("failed with")) {
         throw err; // Rethrow execution errors
       }
       
@@ -182,20 +201,33 @@ async function fetchAgentResults() {
 
     const agentData = agentResp.data;
     
+    // Log the full structure to help debug
+    console.log("🔍 Agent data structure keys:", Object.keys(agentData));
+    if (agentData.data) {
+      console.log("🔍 Agent.data keys:", Object.keys(agentData.data));
+    }
+    
     // The results should be in resultObject
     let results = null;
 
     // Try different possible locations for the results
     if (agentData.data?.resultObject) {
       results = agentData.data.resultObject;
+      console.log("✓ Found results in data.resultObject");
     } else if (agentData.resultObject) {
       results = agentData.resultObject;
+      console.log("✓ Found results in resultObject");
     } else if (agentData.data?.lastEndMessage?.resultObject) {
       results = agentData.data.lastEndMessage.resultObject;
+      console.log("✓ Found results in data.lastEndMessage.resultObject");
+    } else if (agentData.data?.output) {
+      results = agentData.data.output;
+      console.log("✓ Found results in data.output");
     }
 
     // If results are a string (CSV/JSON), try parsing
     if (typeof results === 'string') {
+      console.log("🔄 Results are string, attempting to parse...");
       try {
         results = JSON.parse(results);
       } catch (e) {
@@ -204,12 +236,29 @@ async function fetchAgentResults() {
     }
 
     if (!results || !Array.isArray(results) || results.length === 0) {
-      console.error("❌ No results found in agent data");
-      console.log("Agent data structure:", JSON.stringify(agentData, null, 2).slice(0, 2000));
-      throw new Error("No results returned by PhantomBuster. The agent may need more time or returned empty results.");
+      console.error("❌ No valid results array found");
+      console.log("📋 Full agent response (first 3000 chars):");
+      console.log(JSON.stringify(agentData, null, 2).slice(0, 3000));
+      
+      // Check if there's an error message in the agent data
+      const errorMsg = agentData.data?.lastEndMessage?.error || 
+                       agentData.data?.error || 
+                       agentData.error;
+      
+      if (errorMsg) {
+        throw new Error(`PhantomBuster agent error: ${errorMsg}`);
+      }
+      
+      throw new Error("No results returned by PhantomBuster. The agent may have failed or returned empty results. Check the logs above for the full response structure.");
     }
 
     console.log(`✅ Retrieved ${results.length} profiles from agent`);
+    
+    // Log first profile structure to help with mapping
+    if (results.length > 0) {
+      console.log("📋 First profile keys:", Object.keys(results[0]));
+    }
+    
     return results;
 
   } catch (err) {
@@ -441,6 +490,34 @@ app.get("/health", (req, res) => {
   };
   
   res.json(health);
+});
+
+// Debug endpoint to check PhantomBuster agent directly
+app.get("/debug/phantom", async (req, res) => {
+  if (!PHANTOMBUSTER_API_KEY || !PHANTOM_ID) {
+    return res.status(500).json({ error: "Missing PhantomBuster configuration" });
+  }
+
+  try {
+    const headersV1 = {
+      "X-Phantombuster-Key-1": PHANTOMBUSTER_API_KEY,
+    };
+
+    const agentUrl = `https://phantombuster.com/api/v1/agent/${PHANTOM_ID}`;
+    const agentResp = await axios.get(agentUrl, { headers: headersV1, timeout: 30000 });
+
+    res.json({
+      message: "PhantomBuster agent data",
+      agentId: PHANTOM_ID,
+      data: agentResp.data
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Failed to fetch agent data",
+      details: err.message,
+      response: err.response?.data
+    });
+  }
 });
 
 // ---------------------- Server Start ----------------------
