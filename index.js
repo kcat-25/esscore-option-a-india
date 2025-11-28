@@ -1,58 +1,65 @@
-// index.js - Minimal test backend for Esscore Lead Generator
-
-const express = require("express");
-const cors = require("cors");
-
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// HEALTH CHECK
-app.get("/", (req, res) => {
-  res.send("Esscore minimal test backend running.");
-});
-
-// MAIN API ENDPOINT – TEMP TEST VERSION
+// MAIN API ENDPOINT – PHANTOM ONLY (no Hunter yet)
 app.post("/generate", async (req, res) => {
   try {
-    console.log("TEST /generate hit with body:", req.body);
+    console.log("STEP 1 → Received request:", req.body);
+    const { industry, location, count, lead_count } = req.body;
+    const desiredCount = count ?? lead_count;
 
-    const header = "Name,Title,Company,Website,Email,Confidence,LinkedIn";
-    const rows = [
+    console.log("STEP 2 → Running Phantom...");
+    let rows = [];
+
+    try {
+      rows = await runPhantom();
+    } catch (err) {
+      console.error("PHANTOM ERROR:", err);
+      return res.status(500).send("PhantomBuster failed: " + err.message);
+    }
+
+    console.log("STEP 2 → Phantom returned rows:", rows.length);
+
+    if (!rows.length) {
+      return res.status(500).send("Phantom returned 0 profiles.");
+    }
+
+    console.log("STEP 3 → Mapping fields...");
+    const mapped = rows.map((r) => {
+      const fullName =
+        r.fullName || `${r.firstName || ""} ${r.lastName || ""}`.trim();
+      return {
+        name: fullName,
+        title: r.occupation || r.jobTitle || "",
+        company: r.companyName || r.company || "",
+        website: r.companyWebsite || r.website || "",
+        linkedin: r.profileUrl || r.linkedinProfileUrl || "",
+      };
+    });
+
+    const limited =
+      desiredCount && desiredCount > 0
+        ? mapped.slice(0, desiredCount)
+        : mapped;
+
+    console.log("STEP 4 → Returning CSV of", limited.length, "rows");
+
+    // Build CSV
+    const header = "Name,Title,Company,Website,LinkedIn";
+    const lines = limited.map((r) =>
       [
-        "Test Person 1",
-        "R&D Manager",
-        "ABC Foods",
-        "https://abcfoods.com",
-        "test1@abcfoods.com",
-        "90",
-        "https://linkedin.com/in/test1"
-      ],
-      [
-        "Test Person 2",
-        "Procurement Head",
-        "XYZ Beverages",
-        "https://xyzbev.com",
-        "test2@xyzbev.com",
-        "85",
-        "https://linkedin.com/in/test2"
+        r.name,
+        r.title,
+        r.company,
+        r.website,
+        r.linkedin,
       ]
-    ];
-
-    const lines = rows.map(r =>
-      r.map(v => `"${String(v || "").replace(/"/g, '""')}"`).join(",")
+        .map((v) => `"${String(v || "").replace(/"/g, '""')}"`)
+        .join(",")
     );
 
     res.set("Content-Type", "text/csv");
-    res.status(200).send([header, ...lines].join("\n"));
+    res.send([header, ...lines].join("\n"));
+
   } catch (e) {
-    console.error("SERVER ERROR in TEST endpoint:", e);
+    console.error("SERVER ERROR:", e);
     res.status(500).send("Server error: " + e.message);
   }
-});
-
-// START SERVER
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`Server running on ${PORT}`);
 });
