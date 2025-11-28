@@ -24,185 +24,89 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /* ==========================================
    1️⃣ Run LinkedIn Search PhantomBuster
    ========================================== */
+/**
+ * Launch LinkedIn Search Export phantom and wait for result.
+ */
 async function runPhantom() {
+  const headers = {
+    "X-Phantombuster-Key": PHANTOMBUSTER_API_KEY,
+    "Content-Type": "application/json",
+  };
+
   console.log("Launching Phantom...");
 
-  // Start phantom
+  // 1) Launch the agent
   await axios.post(
     "https://api.phantombuster.com/api/v2/agents/launch",
     { id: PHANTOM_ID },
-    {
-      headers: {
-        "X-Phantombuster-Key-1": PHANTOMBUSTER_API_KEY,
-      },
-    }
+    { headers }
   );
 
-  // Wait 10 sec for Phantom to start
-  await sleep(10000);
+  // 2) Give Phantom a moment to spin up
+  await sleep(8000);
 
-  // Poll until finished
-  for (let i = 0; i < 20; i++) {
-    await sleep(8000);
+  // 3) Find the latest container for this agent
+  let containerId = null;
 
-    const status = await axios.get(
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    console.log(`Fetching container (attempt ${attempt})...`);
+
+    const containersRes = await axios.get(
       "https://api.phantombuster.com/api/v2/containers/fetch-all",
       {
-        headers: { "X-Phantombuster-Key-1": PHANTOMBUSTER_API_KEY },
+        headers,
         params: { agentId: PHANTOM_ID, count: 1 },
       }
     );
 
-    const container = status.data.containers[0];
-    if (container.status === "finished" || container.status === "finalized") {
+    const container = containersRes.data?.containers?.[0];
+
+    if (container && container.id) {
+      containerId = container.id;
+      console.log("Found container:", containerId, "status:", container.status);
+      break;
+    }
+
+    await sleep(5000);
+  }
+
+  if (!containerId) {
+    throw new Error("Could not find container for Phantom ID " + PHANTOM_ID);
+  }
+
+  // 4) Poll this specific container until it's finished
+  for (let i = 0; i < 25; i++) {
+    const statusRes = await axios.get(
+      "https://api.phantombuster.com/api/v2/containers/fetch",
+      {
+        headers,
+        params: { id: containerId },
+      }
+    );
+
+    const c = statusRes.data?.container;
+    const status = c?.status;
+    console.log(`Container ${containerId} status:`, status);
+
+    if (status === "finished" || status === "finalized") {
       console.log("Phantom finished!");
       break;
     }
-    console.log("Waiting for Phantom...");
+
+    await sleep(8000);
   }
 
-  // Fetch output
-  const out = await axios.get(
+  // 5) Fetch output for this container
+  const outputRes = await axios.get(
     "https://api.phantombuster.com/api/v2/containers/fetch-output",
     {
-      headers: { "X-Phantombuster-Key-1": PHANTOMBUSTER_API_KEY },
-      params: { id: PHANTOM_ID, format: "json" },
+      headers,
+      params: { id: containerId, format: "json" },
     }
   );
 
-  return out.data.output?.resultObject || [];
+  const result = outputRes.data?.output?.resultObject || [];
+  console.log("Phantom output rows:", result.length);
+
+  return result;
 }
-
-/* ==========================================
-   2️⃣ Extract domain from website
-   ========================================== */
-function getDomain(website) {
-  if (!website) return null;
-  try {
-    const url = new URL(website.startsWith("http") ? website : "https://" + website);
-    return url.hostname.replace(/^www\./, "");
-  } catch {
-    return null;
-  }
-}
-
-/* ==========================================
-   3️⃣ Find email using Hunter.io
-   ========================================== */
-async function findEmailHunter(fullName, domain) {
-  if (!fullName || !domain) return null;
-
-  const parts = fullName.trim().split(" ");
-  const first = parts[0];
-  const last = parts.slice(1).join(" ") || "";
-
-  if (!last) return null;
-
-  try {
-    const res = await axios.get("https://api.hunter.io/v2/email-finder", {
-      params: {
-        api_key: HUNTER_API_KEY,
-        domain,
-        first_name: first,
-        last_name: last,
-      },
-    });
-
-    const data = res.data?.data;
-    if (!data?.email) return null;
-
-    return { email: data.email, score: data.score || "" };
-  } catch (err) {
-    console.log("Hunter error:", err.response?.data || err.message);
-    return null;
-  }
-}
-
-/* ==========================================
-   4️⃣ API Endpoint
-   ========================================== */
-app.post("/generate", async (req, res) => {
-  try {
-    console.log("REQUEST →", req.body);
-
-    const { industry, location, count, lead_count } = req.body;
-    const desiredCount = count ?? lead_count;
-
-    // === Run Phantom ===
-    const rows = await runPhantom();
-    console.log("Phantom returned:", rows.length);
-
-    if (!rows.length) {
-      return res.status(500).send("No data returned from Phantom");
-    }
-
-    // === Normalize data from Phantom ===
-    const mapped = rows.map((r) => {
-      const name = r.fullName || `${r.firstName || ""} ${r.lastName || ""}`.trim();
-      return {
-        name,
-        title: r.occupation || "",
-        company: r.companyName || "",
-        website: r.companyWebsite || "",
-        linkedin: r.profileUrl || "",
-      };
-    });
-
-    const limited = desiredCount ? mapped.slice(0, desiredCount) : mapped;
-
-    // === Enrich with Hunter emails ===
-    const final = [];
-    for (const lead of limited) {
-      const domain = getDomain(lead.website);
-      let hunterData = null;
-
-      if (domain) {
-        hunterData = await findEmailHunter(lead.name, domain);
-      }
-
-      final.push({
-        name: lead.name,
-        title: lead.title,
-        company: lead.company,
-        website: lead.website,
-        email: hunterData?.email || "",
-        confidence: hunterData?.score || "",
-        linkedin: lead.linkedin,
-      });
-    }
-
-    // === Build CSV ===
-    const header =
-      "Name,Title,Company,Website,Email,Confidence,LinkedIn";
-
-    const lines = final.map((r) =>
-      [
-        r.name,
-        r.title,
-        r.company,
-        r.website,
-        r.email,
-        r.confidence,
-        r.linkedin,
-      ]
-        .map((v) => `"${String(v || "").replace(/"/g, '""')}"`)
-        .join(",")
-    );
-
-    res.set("Content-Type", "text/csv");
-    res.send([header, ...lines].join("\n"));
-  } catch (err) {
-    console.error("SERVER ERROR:", err);
-    res.status(500).send("Server error: " + err.message);
-  }
-});
-
-/* ==========================================
-   5️⃣ Health Check
-   ========================================== */
-app.get("/", (req, res) => {
-  res.send("Esscore Option A backend is running.");
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
