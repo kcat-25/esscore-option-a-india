@@ -1,7 +1,3 @@
-// index.js - Esscore Option A backend
-// Uses PhantomBuster to read your LinkedIn Search Export phantom output
-// and Hunter to enrich with emails, then returns CSV to Google Sheets.
-
 // index.js - Minimal test backend for Esscore Lead Generator
 
 const express = require("express");
