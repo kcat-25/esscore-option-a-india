@@ -1,7 +1,3 @@
-/**
- * Launch LinkedIn Search Export Phantom and get resultObject directly.
- * Uses /agent/{id}/launch which returns the result in one response.
- */
 async function runPhantom() {
   const headers = {
     "X-Phantombuster-Key-1": PHANTOMBUSTER_API_KEY,
@@ -10,21 +6,20 @@ async function runPhantom() {
 
   const url = `https://api.phantombuster.com/api/v2/agent/${PHANTOM_ID}/launch`;
 
-  console.log("Calling Phantom launch endpoint:", url);
+  console.log("Launching Phantom via:", url);
 
-  // This call waits for the run to finish and returns the resultObject
   const resp = await axios.post(url, {}, { headers });
 
-  // Log a truncated view of the raw response so we can debug if needed
   const data = resp.data;
+
   console.log(
-    "Raw launch response (truncated):",
+    "Raw Phantom launch response (first 1000 chars):",
     JSON.stringify(data).slice(0, 1000)
   );
 
-  // Try the common shapes for LinkedIn Search Export
   let rows = null;
 
+  // Try common shapes
   if (Array.isArray(data.resultObject)) {
     rows = data.resultObject;
   } else if (Array.isArray(data.output?.resultObject)) {
@@ -35,11 +30,10 @@ async function runPhantom() {
 
   if (!rows || rows.length === 0) {
     throw new Error(
-      "Phantom returned no rows in resultObject. " +
-        "Check the raw launch response in logs and your Phantom configuration."
+      "Phantom returned no resultObject array. Check the raw response in the logs."
     );
   }
 
-  console.log("Phantom rows received:", rows.length);
+  console.log("Phantom rows:", rows.length);
   return rows;
 }
