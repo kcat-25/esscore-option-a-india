@@ -122,75 +122,25 @@ function getDomain(website) {
   }
 }
 
-// MAIN API ENDPOINT
+// MAIN API ENDPOINT – TEMP TEST VERSION
 app.post("/generate", async (req, res) => {
   try {
-    const { industry, location, title, size, count } = req.body;
-    console.log("Request:", req.body);
+    console.log("TEST /generate hit with body:", req.body);
 
-    // Run phantom
-    const rows = await runPhantom();
-    if (!rows.length) return res.status(500).send("No rows returned from Phantom");
-
-    // Map fields
-    const mapped = rows.map((r) => {
-      const fullName = r.fullName || `${r.firstName || ""} ${r.lastName || ""}`.trim();
-      return {
-        name: fullName,
-        title: r.occupation || r.jobTitle || "",
-        company: r.companyName || r.company || "",
-        website: r.companyWebsite || r.website || "",
-        linkedin: r.profileUrl || r.linkedinProfileUrl || "",
-      };
-    });
-
-    const limited = count ? mapped.slice(0, count) : mapped;
-
-    // Enrich with Hunter
-    const final = [];
-    for (const r of limited) {
-      const domain = getDomain(r.website);
-      const h = domain ? await findEmailHunter(r.name, domain) : null;
-
-      final.push({
-        name: r.name,
-        title: r.title,
-        company: r.company,
-        website: r.website,
-        email: h?.email || "",
-        confidence: h?.score || "",
-        linkedin: r.linkedin,
-      });
-    }
-
-    // Build CSV
     const header = "Name,Title,Company,Website,Email,Confidence,LinkedIn";
-    const lines = final.map((r) =>
-      [
-        r.name,
-        r.title,
-        r.company,
-        r.website,
-        r.email,
-        r.confidence,
-        r.linkedin,
-      ]
-        .map((v) => `"${String(v || "").replace(/"/g, '""')}"`)
-        .join(",")
+    const rows = [
+      ["Test Person 1", "R&D Manager", "ABC Foods", "https://abcfoods.com", "test1@abcfoods.com", "90", "https://linkedin.com/in/test1"],
+      ["Test Person 2", "Procurement Head", "XYZ Beverages", "https://xyzbev.com", "test2@xyzbev.com", "85", "https://linkedin.com/in/test2"]
+    ];
+
+    const lines = rows.map(r =>
+      r.map(v => `"${String(v || "").replace(/"/g, '""')}"`).join(",")
     );
 
     res.set("Content-Type", "text/csv");
-    res.send([header, ...lines].join("\n"));
+    res.status(200).send([header, ...lines].join("\n"));
   } catch (e) {
-    console.error(e);
+    console.error("SERVER ERROR in TEST endpoint:", e);
     res.status(500).send("Server error: " + e.message);
   }
 });
-
-// Health check
-app.get("/", (req, res) => {
-  res.send("Esscore Option A backend running.");
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
