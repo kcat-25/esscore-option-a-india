@@ -1,6 +1,7 @@
 // index.js – Esscore Option A backend using PhantomBuster + Hunter
-// This version uses /agent/{id}/launch (NO polling, NO containers)
+// Google Sheets calls POST /generate and receives CSV rows.
 
+// ---------------------- Imports & app setup ----------------------
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -9,7 +10,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- Environment variables ---
+// ---------------------- Env variables ----------------------
 const PHANTOMBUSTER_API_KEY = process.env.PHANTOMBUSTER_API_KEY;
 const PHANTOM_ID = process.env.PHANTOM_ID;
 const HUNTER_API_KEY = process.env.HUNTER_API_KEY;
@@ -20,10 +21,14 @@ if (!PHANTOMBUSTER_API_KEY || !PHANTOM_ID || !HUNTER_API_KEY) {
   );
 }
 
+// Small helper (not used now but handy later)
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// ---------------------- PhantomBuster ----------------------
 /**
- * Launch Phantom and get its resultObject in one call.
+ * Launch LinkedIn Search Export phantom and return an array of rows.
+ * Uses v1 API:
+ *   POST https://phantombuster.com/api/v1/agent/{id}/launch
  */
 async function runPhantom() {
   const headers = {
@@ -31,20 +36,48 @@ async function runPhantom() {
     "Content-Type": "application/json",
   };
 
-  const url = `https://api.phantombuster.com/api/v2/agent/${PHANTOM_ID}/launch`;
-
+  const url = `https://phantombuster.com/api/v1/agent/${PHANTOM_ID}/launch`;
   console.log("Launching Phantom via:", url);
 
-  const resp = await axios.post(url, {}, { headers });
-  const data = resp.data;
+  let resp;
+  try {
+    // "output: first-result-object" → Phantom returns resultObject directly
+    resp = await axios.post(
+      url,
+      {
+        output: "first-result-object",
+      },
+      { headers }
+    );
+  } catch (err) {
+    console.error(
+      "PHANTOM HTTP ERROR:",
+      err.response?.status,
+      err.response?.data || err.message
+    );
+    throw new Error(
+      "Request to PhantomBuster failed with status " +
+        (err.response?.status ?? "unknown")
+    );
+  }
 
+  const payload = resp.data;
   console.log(
     "Raw Phantom launch response (first 1000 chars):",
-    JSON.stringify(data).slice(0, 1000)
+    JSON.stringify(payload).slice(0, 1000)
   );
 
-  let rows = null;
+  // v1 API is JSend-style: { status: "success", data: {...} }
+  if (payload.status && payload.status !== "success") {
+    throw new Error(
+      "Phantom v1 API returned status: " + payload.status + " – " +
+        JSON.stringify(payload)
+    );
+  }
 
+  const data = payload.data || payload;
+
+  let rows = null;
   if (Array.isArray(data.resultObject)) {
     rows = data.resultObject;
   } else if (Array.isArray(data.output?.resultObject)) {
@@ -55,7 +88,7 @@ async function runPhantom() {
 
   if (!rows || rows.length === 0) {
     throw new Error(
-      "Phantom returned no resultObject array. Check the raw response in logs."
+      "Phantom returned no rows in resultObject. Check Phantom output."
     );
   }
 
@@ -63,13 +96,13 @@ async function runPhantom() {
   return rows;
 }
 
-/**
- * Extract domain from a website URL.
- */
+// ---------------------- Hunter.io helpers ----------------------
 function getDomain(website) {
   if (!website) return null;
   try {
-    const url = new URL(website.startsWith("http") ? website : "https://" + website);
+    const url = new URL(
+      website.startsWith("http") ? website : "https://" + website
+    );
     return url.hostname.replace(/^www\./, "");
   } catch {
     return null;
@@ -77,7 +110,7 @@ function getDomain(website) {
 }
 
 /**
- * Find email using Hunter.io.
+ * Find email using Hunter.io for a person + company domain.
  */
 async function findEmailHunter(fullName, domain) {
   if (!fullName || !domain) return null;
@@ -108,8 +141,15 @@ async function findEmailHunter(fullName, domain) {
   }
 }
 
+// ---------------------- /generate endpoint ----------------------
 /**
- * Main /generate endpoint called by Google Sheets.
+ * POST /generate
+ * Body from Google Sheets:
+ *   { industry, location, count }   // we ignore industry/location for now
+ *
+ * Returns:
+ *   text/csv with columns:
+ *   Name,Title,Company,Website,Email,Confidence,LinkedIn
  */
 app.post("/generate", async (req, res) => {
   try {
@@ -130,7 +170,7 @@ app.post("/generate", async (req, res) => {
       return res.status(500).send("Phantom returned 0 profiles.");
     }
 
-    // 2) Normalize Phantom rows
+    // 2) Normalize Phantom rows into a common shape
     const mapped = rows.map((r) => {
       const name =
         r.fullName || `${r.firstName || ""} ${r.lastName || ""}`.trim();
@@ -189,13 +229,12 @@ app.post("/generate", async (req, res) => {
   }
 });
 
-/**
- * Health check
- */
+// ---------------------- Health check ----------------------
 app.get("/", (req, res) => {
   res.send("Esscore Option A backend is running.");
 });
 
+// ---------------------- Start server ----------------------
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on ${PORT}`);
